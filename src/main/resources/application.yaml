@@ -1,3 +1,6 @@
 spring:
   application:
     name: springai
+  ai:
+    openai:
+      api-key:  #${openAI_API_KEY}
