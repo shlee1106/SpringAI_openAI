@@ -3,6 +3,26 @@ spring:
     import: optional:file:.env[.properties]
   application:
     name: springai
+
+  # 1. MySQL 데이터소스 설정
+  datasource:
+    url: "jdbc:mysql://localhost:3306/chatai?serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true"
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  # 2. Spring AI 설정
   ai:
     openai:
       api-key: ${OPENAI_API_KEY}
+      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+      chat:
+        options:
+          model: ${GROQ_MODEL:openai/gpt-oss-20b}
+
+    # 대화 메모리(Chat Memory) JDBC 설정
+    chat:
+      memory:
+        repository:
+          jdbc:
+            initialize-schema: never

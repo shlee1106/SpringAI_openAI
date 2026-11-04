@@ -7,6 +7,9 @@ import org.springframework.ai.audio.transcription.AudioTranscriptionResponse;
 import org.springframework.ai.audio.tts.Speech;
 import org.springframework.ai.audio.tts.TextToSpeechPrompt;
 import org.springframework.ai.audio.tts.TextToSpeechResponse;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.memory.ChatMemoryRepository;
+import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -35,7 +38,7 @@ public class OpenAIService {
     private final OpenAiImageModel openAiImageModel;
     private final OpenAiAudioSpeechModel openAiAudioSpeechModel;
     private final OpenAiAudioTranscriptionModel openAiAudioTranscriptionModel;
-
+    private final ChatMemoryRepository chatMemoryRepository;
     /** 1-1. ChatModel : response
      * 호출되면 모든 응답이 생성된 이후에 전체응답을 받는 메소드 */
     public String generate(String text) {
@@ -49,7 +52,7 @@ public class OpenAIService {
         /* 설정 커스텀은 Introduction :: SpringAI Reference -> Reference -> Models
         -> Chat Models -> OpenAI 해당 경로에 들어온 후 개인적으로 필요한 커스텀 설정진행*/
         OpenAiChatOptions options = OpenAiChatOptions.builder()
-                .model("gpt-4o-mini")
+                .model("openai/gpt-oss-20b") //openAI API Key 유료로 인해 무료 API KEY groq 사용
                 .temperature(0.7)
                 .build();
 
@@ -67,26 +70,61 @@ public class OpenAIService {
     /** 1-2. ChatModel : response stream
     String으로 text를 보낸 이후에 토큰 단위로 생성되는
     즉시 stream한 형태로 받을 수 있는 메소드
+     참고) Flux란 데이터가 생성되는 즉시 토큰단위로 반환하는 타입
      */
     public Flux<String> generateStream(String text) {
 
+        // 유저&페이지별 ChatMemory를 관리하기 위한 key(우선은 명시적으로)
+        String userId = "xxxjjhhh" + "_" + "1";
+
         // 메세지
-        SystemMessage systemMessage = new SystemMessage("");
-        UserMessage userMessage = new UserMessage(text);
-        AssistantMessage assistantMessage = new AssistantMessage("");
+        ChatMemory chatMemory = MessageWindowChatMemory.builder()
+                .maxMessages(10)
+                .chatMemoryRepository(chatMemoryRepository)
+                .build();
+        chatMemory.add(userId, new UserMessage(text)); // 신규 메세지 추가
 
         // 옵션(위 1-1 메소드와 동일하게 공식사이트 접속 후 원하는 커스텀 설정)
         OpenAiChatOptions options = OpenAiChatOptions.builder()
-                .model("gpt-4o-mini")
+                .model("openai/gpt-oss-20b") //openAI API Key 유료로 인해 무료 API KEY groq 사용
                 .temperature(0.7)
                 .build();
 
         // 프롬프트
-        // List.of로 새로운 리스트 생성 후 안에 설정한 메세지(system, user, assistant)삽입
-        Prompt prompt = new Prompt(List.of(systemMessage, userMessage, assistantMessage), options);
+        // 위 설정한 신규 메세지(chatMemory)안 get메소드 호출 후 개발자가 임의로 지정한 userId삽입
+        Prompt prompt = new Prompt(chatMemory.get(userId), options);
+
+        // 응답 메세지를 저장할 임시 버퍼
+        StringBuffer responseBuffer = new StringBuffer();
+
+        /**
+         * AI의 실시간 스트리밍 토큰을 클라이언트에 즉시 방출,
+         * 스트림 완료 시점에 전체 텍스트 재조립하여 사용자 대화기록을
+         * 데이터베이스에 영구 저장하는 비동기 파이트라인
+         */
 
         return openAiChatModel.stream(prompt)
-                .mapNotNull(response -> response.getResult().getOutput().getText());
+                .mapNotNull(response -> {
+                    // 텍스트 데이터가 비어있는 마지막 조각은 안전하게 무시합니다.
+                    if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+                        return null;
+                    }
+                    // 위 방어막을 통과한(실제 글자가 있는) 조각만 꺼냅니다.
+                    String token = response.getResult().getOutput().getText();
+                    if (token != null) {
+                        responseBuffer.append(token); // 실시간 도착하는 글자 조각을 버퍼에 모아둠
+                    }
+                    return token; // 브라우저로 실시간 토큰 방출
+                })
+                // 스트리밍 종료 시 완성된 전체 답변을 메모리 및 영속DB(MySQL)에 저장
+                .doOnComplete(() -> {
+                    // 사용자의 대화 메모리에 방금 완성된 AI 답변추가
+                    // add메소드 이용시 chatMemoryRepository에 사용자 대화, AI 답변 영속성 DB(MySQL)에 저장
+                    chatMemory.add(userId, new AssistantMessage(responseBuffer.toString()));
+                })
+                .doOnError(e -> {
+                    System.err.println("스트리밍 통신 중 에러 발생: " + e.getMessage());
+                });
     }
 
     /** 2. Embedding API 호출 메소드
